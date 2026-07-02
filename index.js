@@ -1,9 +1,13 @@
 require("dotenv").config();
 const express = require("express");
+const twilio = require("twilio");
 const Anthropic = require("@anthropic-ai/sdk");
 const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
+// Railway terminates TLS in front of us; without this, req.protocol reports
+// "http" and every genuine Twilio signature check fails.
+app.set("trust proxy", true);
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
@@ -11,15 +15,31 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
 const ESCALATE_TAG = "[ESCALATE]";
+const MAX_TURNS = 20;
+const MAX_SPEECH_LENGTH = 500;
+const CALL_TTL_MS = 30 * 60 * 1000;
+
+// Every /answer, /gather, /status hit must carry a valid X-Twilio-Signature,
+// or it's rejected outright — otherwise anyone on the internet can query
+// any guest's door code/wifi password directly over HTTP, no phone call
+// or Twilio account needed.
+const requireTwilioSignature = twilio.webhook();
 
 // ── Active call sessions, keyed by CallSid ──────────────────────────────────
 const activeCalls = new Map();
+
+setInterval(() => {
+  const cutoff = Date.now() - CALL_TTL_MS;
+  for (const [callSid, callData] of activeCalls) {
+    if (callData.lastActivity < cutoff) activeCalls.delete(callSid);
+  }
+}, 5 * 60 * 1000).unref();
 
 // ── Health check ─────────────────────────────────────────────────────────────
 app.get("/", (req, res) => res.send("Aria voice server is running"));
 
 // ── Initial call handler — Twilio "A call comes in" webhook ────────────────
-app.post("/answer", async (req, res) => {
+app.post("/answer", requireTwilioSignature, async (req, res) => {
   const from = req.body.From || "";
   const callSid = req.body.CallSid;
 
@@ -34,6 +54,7 @@ app.post("/answer", async (req, res) => {
     guestContext,
     history: [],
     needsEscalation: false,
+    lastActivity: Date.now(),
   });
 
   const greeting = buildGreeting(guestContext);
@@ -41,11 +62,11 @@ app.post("/answer", async (req, res) => {
 });
 
 // ── Speech input handler — Twilio <Gather> action ───────────────────────────
-app.post("/gather", async (req, res) => {
+app.post("/gather", requireTwilioSignature, async (req, res) => {
   const callSid = req.body.CallSid;
-  const speech = (req.body.SpeechResult || "").trim();
+  let speech = (req.body.SpeechResult || "").trim();
 
-  console.log("SPEECH:", speech, "CALLSID:", callSid);
+  console.log("SPEECH LENGTH:", speech.length, "CALLSID:", callSid);
 
   const callData = activeCalls.get(callSid);
   if (!callData) {
@@ -54,8 +75,19 @@ app.post("/gather", async (req, res) => {
     );
   }
 
+  callData.lastActivity = Date.now();
+
   if (!speech) {
     return res.type("text/xml").send(twimlGather("Sorry, I didn't catch that. Could you say that again?"));
+  }
+
+  if (speech.length > MAX_SPEECH_LENGTH) speech = speech.slice(0, MAX_SPEECH_LENGTH);
+
+  if (callData.history.length >= MAX_TURNS * 2) {
+    callData.needsEscalation = true;
+    return res.type("text/xml").send(
+      twimlEnd("This call has gone on longer than I can help with directly, so I'll pass everything to the team to follow up.")
+    );
   }
 
   callData.history.push({ role: "user", content: speech });
@@ -73,7 +105,7 @@ app.post("/gather", async (req, res) => {
 });
 
 // ── Call status callback — Twilio "Call status changes" webhook ────────────
-app.post("/status", async (req, res) => {
+app.post("/status", requireTwilioSignature, async (req, res) => {
   const callSid = req.body.CallSid;
   const status = req.body.CallStatus;
 
