@@ -69,10 +69,6 @@ app.post("/gather", async (req, res) => {
 
   callData.history.push({ role: "assistant", content: reply });
 
-  if (escalate) {
-    return res.type("text/xml").send(twimlEnd(reply));
-  }
-
   res.type("text/xml").send(twimlGather(reply));
 });
 
@@ -174,13 +170,13 @@ async function askClaude(callData) {
 function twimlGather(speech) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Amy" language="en-GB">${escapeXml(speech)}</Say>
+  <Say voice="Polly.Amy-Neural" language="en-GB">${escapeXml(speech)}</Say>
   <Gather input="speech" action="/gather" method="POST" speechTimeout="2" timeout="10">
   </Gather>
-  <Say voice="Polly.Amy" language="en-GB">Is there anything else I can help you with?</Say>
+  <Say voice="Polly.Amy-Neural" language="en-GB">Is there anything else I can help you with?</Say>
   <Gather input="speech" action="/gather" method="POST" speechTimeout="2" timeout="10">
   </Gather>
-  <Say voice="Polly.Amy" language="en-GB">Thank you for calling Allure Abode. Goodbye!</Say>
+  <Say voice="Polly.Amy-Neural" language="en-GB">Thank you for calling Allure Abode. Goodbye!</Say>
   <Hangup/>
 </Response>`;
 }
@@ -188,7 +184,7 @@ function twimlGather(speech) {
 function twimlEnd(speech) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Amy" language="en-GB">${escapeXml(speech)}</Say>
+  <Say voice="Polly.Amy-Neural" language="en-GB">${escapeXml(speech)}</Say>
   <Hangup/>
 </Response>`;
 }
